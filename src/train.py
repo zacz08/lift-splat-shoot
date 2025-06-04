@@ -17,7 +17,7 @@ from .tools import SimpleLoss, get_batch_iou, get_val_info
 
 def train(version,
             dataroot='/data/nuscenes',
-            nepochs=10000,
+            nepochs=2,
             gpuid=1,
 
             H=900, W=1600,
@@ -36,7 +36,7 @@ def train(version,
             zbound=[-10.0, 10.0, 20.0],
             dbound=[4.0, 45.0, 1.0],
 
-            bsz=4,
+            bsz=16,
             nworkers=10,
             lr=1e-3,
             weight_decay=1e-7,
@@ -72,7 +72,7 @@ def train(version,
     loss_fn = SimpleLoss(pos_weight).cuda(gpuid)
 
     writer = SummaryWriter(logdir=logdir)
-    val_step = 1000 if version == 'mini' else 10000
+    val_step = 20 if version == 'mini' else 10000
 
     model.train()
     counter = 0

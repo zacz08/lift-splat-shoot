@@ -118,7 +118,7 @@ def lidar_check(version,
 
 def cumsum_check(version,
                 dataroot='/data/nuscenes',
-                gpuid=1,
+                gpuid=0,
 
                 H=900, W=1600,
                 resize_lim=(0.193, 0.225),
