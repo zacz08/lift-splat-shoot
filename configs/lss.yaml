@@ -1,0 +1,39 @@
+# config.yaml
+
+version: mini  # or 'trainval' etc.
+dataroot: /data/nuscenes
+
+nepochs: 2
+gpuid: 1
+
+data_aug:
+  H: 900
+  W: 1600
+  resize_lim: [0.193, 0.225]
+  final_dim: [128, 352]
+  bot_pct_lim: [0.0, 0.22]
+  rot_lim: [-5.4, 5.4]
+  rand_flip: true
+  ncams: 5
+  cams: [CAM_FRONT_LEFT, CAM_FRONT, CAM_FRONT_RIGHT, 
+          CAM_BACK_LEFT, CAM_BACK, CAM_BACK_RIGHT]
+
+grid_conf:
+  xbound: [-50.0, 50.0, 0.5]
+  ybound: [-50.0, 50.0, 0.5]
+  zbound: [-10.0, 10.0, 20.0]
+  dbound: [4.0, 45.0, 1.0]
+
+optim:
+  lr: 0.001
+  weight_decay: 1e-7
+  max_grad_norm: 5.0
+
+loader:
+  bsz: 16
+  nworkers: 10
+
+loss:
+  pos_weight: 2.13
+
+logdir: ./runs
