@@ -137,4 +137,5 @@ imagenet_pretrained/
 *.csv
 ckpts/
 data/
-logs/
+lightning_logs/
+image_log/
