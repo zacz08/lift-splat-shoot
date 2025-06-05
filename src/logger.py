@@ -166,15 +166,16 @@ class ImageLogger(Callback):
 
 def combine_masks_to_rgb(mask):
     h, w = mask.shape[1:]
-    rgb_img = np.zeros((h, w, 3), dtype=np.uint8)
+    background_color = np.array([30, 30, 30], dtype=np.uint8)
+    rgb_img = np.ones((h, w, 3), dtype=np.uint8) * background_color.reshape(1, 1, 3)
 
     colors = [
-    [0, 128, 255],      # drivable_area - 鲜艳的蓝色
-    [255, 255, 0],      # lane_divider - 高亮的黄色
-    [255, 0, 0],        # vehicle - 鲜艳的红色
-    [0, 255, 0],        # pedestrian - 鲜艳的绿色
-    [255, 0, 255],      # other1 - 紫色
-    [255, 165, 0],      # other2 - 橙色
+    (100, 100, 100),      # drivable_area - 柏油灰
+    (255, 178, 102),      # ped_crossing - 橙黄
+    (220, 220, 100),      # walkway - 浅黄
+    (255, 50, 50),        # stop_line - 鲜红
+    (160, 120, 60),       # carpark_area - 棕褐色
+    (240, 240, 240),      # lane_divider - 白色
 ]
 
     for i in range(mask.shape[0]):
