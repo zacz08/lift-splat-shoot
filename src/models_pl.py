@@ -6,6 +6,8 @@ from efficientnet_pytorch import EfficientNet
 import pytorch_lightning as pl
 from torchvision.models.resnet import resnet18
 from src.log_analysis import parse_csv_and_plot
+from src.metrics import IntersectionOverUnion
+from src.loss import compute_layer_weights
 
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum, SimpleLoss, get_batch_iou
 
@@ -148,10 +150,12 @@ class LiftSplatShoot(pl.LightningModule):
 
         self.use_quickcumsum = True
 
-        self.loss_fn = SimpleLoss(cfg.loss.pos_weight)
+        self.loss_fn = SimpleLoss()
         self.lr = cfg.optim.lr
         self.weight_decay = cfg.optim.weight_decay
         self.max_grad_norm = cfg.optim.max_grad_norm
+
+        self.seg_metric = IntersectionOverUnion(cfg.model.outC).to(self.device)
     
     def create_frustum(self):
         # make grid in image plane
@@ -260,7 +264,8 @@ class LiftSplatShoot(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        loss = self.loss_fn(preds, bev_seg_gt)
+        rec_weight = compute_layer_weights(bev_seg_gt)
+        loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         return loss
@@ -268,10 +273,16 @@ class LiftSplatShoot(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        loss = self.loss_fn(preds, bev_seg_gt)
-        _, _, iou = get_batch_iou(preds, bev_seg_gt)
+        rec_weight = compute_layer_weights(bev_seg_gt)
+        loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
         self.log("val/loss", loss, prog_bar=True)
-        self.log("val/IoU", iou, prog_bar=True)
+        self.seg_metric.update((preds > 0), bev_seg_gt)
+
+    def on_validation_epoch_end(self):
+        score = self.seg_metric.compute()
+        iou= score.mean().item()
+        log_dict = {'val/IoU': iou}
+        self.log_dict(log_dict, prog_bar=True, logger=True, on_epoch=True, sync_dist=True)
 
     @torch.no_grad()
     def log_images(self, batch, N=4, n_row=2, **kwargs):

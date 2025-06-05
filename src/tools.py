@@ -220,14 +220,14 @@ class QuickCumsum(torch.autograd.Function):
 
 
 class SimpleLoss(torch.nn.Module):
-    def __init__(self, pos_weight):
+    def __init__(self, reduction='none'):
         super(SimpleLoss, self).__init__()
-        pos_weight = torch.tensor(pos_weight, dtype=torch.float32)
-        self.loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.loss_fn = torch.nn.BCEWithLogitsLoss(reduction=reduction)
 
-    def forward(self, ypred, ytgt):
-        loss = self.loss_fn(ypred, ytgt)
-        return loss
+    def forward(self, ypred, ytgt, weights):
+        loss = self.loss_fn(ypred, ytgt).mean(dim=(2, 3))
+        weighted_loss = (loss * weights).sum(dim=1)
+        return weighted_loss.mean()
 
 
 def get_batch_iou(preds, binimgs):
