@@ -1,16 +1,13 @@
-"""
-Copyright (C) 2020 NVIDIA Corporation.  All rights reserved.
-Licensed under the NVIDIA Source Code License. See LICENSE at https://github.com/nv-tlabs/lift-splat-shoot.
-Authors: Jonah Philion and Sanja Fidler
-"""
-
 import torch
+import os
+import csv
 from torch import nn
 from efficientnet_pytorch import EfficientNet
 import pytorch_lightning as pl
 from torchvision.models.resnet import resnet18
+from src.log_analysis import parse_csv_and_plot
 
-from .tools import gen_dx_bx, cumsum_trick, QuickCumsum
+from .tools import gen_dx_bx, cumsum_trick, QuickCumsum, SimpleLoss, get_batch_iou
 
 
 class Up(nn.Module):
@@ -128,28 +125,33 @@ class BevEncode(nn.Module):
 
 
 class LiftSplatShoot(pl.LightningModule):
-    def __init__(self, grid_conf, data_aug_conf, outC):
-        super(LiftSplatShoot, self).__init__()
-        self.grid_conf = grid_conf
-        self.data_aug_conf = data_aug_conf
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.save_hyperparameters(cfg)
 
+        self.grid_conf = cfg.grid_conf
         dx, bx, nx = gen_dx_bx(self.grid_conf['xbound'],
-                                              self.grid_conf['ybound'],
-                                              self.grid_conf['zbound'],
-                                              )
+                               self.grid_conf['ybound'],
+                               self.grid_conf['zbound'])
         self.dx = nn.Parameter(dx, requires_grad=False)
         self.bx = nn.Parameter(bx, requires_grad=False)
         self.nx = nn.Parameter(nx, requires_grad=False)
 
-        self.downsample = 16
-        self.camC = 64
+        self.data_aug_conf = cfg.data_aug
+        self.downsample = cfg.model.downsample
+        self.camC = cfg.model.camC
         self.frustum = self.create_frustum()
         self.D, _, _, _ = self.frustum.shape
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
-        self.bevencode = BevEncode(inC=self.camC, outC=outC)
+        self.bevencode = BevEncode(inC=self.camC, outC=cfg.model.outC) # outC: number of classes/semantic layers
 
-        # toggle using QuickCumsum vs. autograd
         self.use_quickcumsum = True
+
+        self.loss_fn = SimpleLoss(cfg.loss.pos_weight)
+        self.lr = cfg.optim.lr
+        self.weight_decay = cfg.optim.weight_decay
+        self.max_grad_norm = cfg.optim.max_grad_norm
     
     def create_frustum(self):
         # make grid in image plane
@@ -254,7 +256,64 @@ class LiftSplatShoot(pl.LightningModule):
         x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
         x = self.bevencode(x)
         return x
+    
+    def training_step(self, batch, batch_idx):
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        loss = self.loss_fn(preds, bev_seg_gt)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
+        return loss
+    
+    def validation_step(self, batch, batch_idx):
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        loss = self.loss_fn(preds, bev_seg_gt)
+        _, _, iou = get_batch_iou(preds, bev_seg_gt)
+        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/IoU", iou, prog_bar=True)
 
-def compile_model(grid_conf, data_aug_conf, outC):
-    return LiftSplatShoot(grid_conf, data_aug_conf, outC)
+    @torch.no_grad()
+    def log_images(self, batch, N=4, n_row=2, **kwargs):
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        log = dict()
+        log["prediction"] = preds
+        log["groundtruth"] = bev_seg_gt   
+        return log
+    
+    @torch.no_grad()
+    def on_train_epoch_end(self):
+        metrics = self.trainer.callback_metrics  # All logged metrics
+        epoch = int(self.current_epoch)
+
+        fields = [
+            "train/loss_epoch",
+            "val/loss",
+            "val/IoU",
+        ]
+
+        row = {"epoch": epoch}
+        for key in fields:
+            val = metrics.get(key)
+            row[key] = val.item() if val is not None else None
+
+        # Write to CSV
+        csv_file = os.path.join(self.logger.log_dir, "train_log.csv")
+        file_exists = os.path.exists(csv_file)
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=["epoch"] + fields)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({k: ("" if v is None else f"{v:.3f}") for k, v in row.items()})
+
+        # Draw learning curve
+        learning_curve = os.path.join(self.logger.log_dir, "loss_plot.png")
+        parse_csv_and_plot(csv_file, learning_curve)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        return optimizer
+
+    def on_before_zero_grad(self, optimizer):
+        torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)

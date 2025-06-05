@@ -1,10 +1,12 @@
 # config.yaml
 
-version: mini  # or 'trainval' etc.
-dataroot: /data/nuscenes
+version: trainval  # or 'trainval' etc.
+dataroot: ./data/nuscenes
 
-nepochs: 2
-gpuid: 1
+model:
+  downsample: 16
+  camC: 64
+  outC: 6
 
 data_aug:
   H: 900
@@ -30,10 +32,17 @@ optim:
   max_grad_norm: 5.0
 
 loader:
-  bsz: 16
-  nworkers: 10
+  batch_size: 64
+  nworkers: 2
+
+trainer:
+  epochs: 50
+  gpus: 1
+  log_freq: 500
+  precision: 32
+
 
 loss:
-  pos_weight: 2.13
+  pos_weight: 1 # tbc
 
 logdir: ./runs

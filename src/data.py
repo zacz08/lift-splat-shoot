@@ -11,6 +11,7 @@ from PIL import Image
 import cv2
 from pyquaternion import Quaternion
 from nuscenes.nuscenes import NuScenes
+from nuscenes.can_bus.can_bus_api import NuScenesCanBus
 from nuscenes.utils.splits import create_splits_scenes
 from nuscenes.utils.data_classes import Box
 from glob import glob
@@ -21,6 +22,8 @@ from .tools import get_lidar_data, img_transform, normalize_img, gen_dx_bx
 class NuscData(torch.utils.data.Dataset):
     def __init__(self, nusc, is_train, data_aug_conf, grid_conf):
         self.nusc = nusc
+        self.dataroot = self.nusc.dataroot
+        self.nusc_can = NuScenesCanBus(dataroot=self.dataroot)
         self.is_train = is_train
         self.data_aug_conf = data_aug_conf
         self.grid_conf = grid_conf
@@ -32,6 +35,11 @@ class NuscData(torch.utils.data.Dataset):
         self.dx, self.bx, self.nx = dx.numpy(), bx.numpy(), nx.numpy()
 
         self.fix_nuscenes_formatting()
+
+        if 'mini' in self.nusc.version:
+            self.split_name = 'mini_train' if self.is_train else 'mini_val'
+        else:
+            self.split_name = 'train' if self.is_train else 'val'
 
         print(self)
 
@@ -77,7 +85,13 @@ class NuscData(torch.utils.data.Dataset):
             'v1.0-mini': {True: 'mini_train', False: 'mini_val'},
         }[self.nusc.version][self.is_train]
 
-        scenes = create_splits_scenes()[split]
+        blacklist = [419] + self.nusc_can.can_blacklist  # # scene-0419 does not have vehicle monitor data
+        blacklist = ['scene-' + str(scene_no).zfill(4) for scene_no in blacklist]
+
+        scenes = create_splits_scenes()[split][:]
+        for scene_no in blacklist:
+            if scene_no in scenes:
+                scenes.remove(scene_no)
 
         return scenes
 
@@ -191,10 +205,31 @@ class NuscData(torch.utils.data.Dataset):
             cv2.fillPoly(img, [pts], 1.0)
 
         return torch.Tensor(img).unsqueeze(0)
+    
+    
+    def get_seg_gt(self, sample_token):
+        '''
+        Get the ground truth segmentation mask for a given sample token.
+        '''
+
+        folder = os.path.join(self.dataroot, 'bev_seg_gt_mask_200', self.split_name)
+        suffix = f"bev_gt_{sample_token}.npy"
+
+        matches = [f for f in os.listdir(folder) if f.endswith(suffix)]
+        if not matches:
+            raise FileNotFoundError(f"No .npy file found ending with: {suffix}")
+        if len(matches) > 1:
+            raise ValueError(f"Multiple files matched token {sample_token}: {matches}")
+
+        file_path = os.path.join(folder, matches[0])
+        bev_mask = np.load(file_path)
+        bev_mask = torch.from_numpy(bev_mask).float()
+        return bev_mask
+    
 
     def choose_cams(self):
-        if self.is_train and self.data_aug_conf['Ncams'] < len(self.data_aug_conf['cams']):
-            cams = np.random.choice(self.data_aug_conf['cams'], self.data_aug_conf['Ncams'],
+        if self.is_train and self.data_aug_conf['ncams'] < len(self.data_aug_conf['cams']):
+            cams = np.random.choice(self.data_aug_conf['cams'], self.data_aug_conf['ncams'],
                                     replace=False)
         else:
             cams = self.data_aug_conf['cams']
@@ -232,37 +267,37 @@ class SegmentationData(NuscData):
 
         cams = self.choose_cams()
         imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
-        binimg = self.get_binimg(rec)
+        sample_token = rec['token']
+        # binimg = self.get_binimg(rec)
+        bev_seg_gt = self.get_seg_gt(sample_token)
         
-        return imgs, rots, trans, intrins, post_rots, post_trans, binimg
+        return imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt
 
 
 def worker_rnd_init(x):
     np.random.seed(13 + x)
 
 
-def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz,
-                 nworkers, parser_name):
-    nusc = NuScenes(version='v1.0-{}'.format(version),
-                    # dataroot=os.path.join(dataroot, version),
-                    dataroot=dataroot,
+def compile_data(cfg, parser_name):
+    nusc = NuScenes(version='v1.0-{}'.format(cfg.version),
+                    dataroot=cfg.dataroot,
                     verbose=False)
     parser = {
         'vizdata': VizData,
         'segmentationdata': SegmentationData,
     }[parser_name]
-    traindata = parser(nusc, is_train=True, data_aug_conf=data_aug_conf,
-                         grid_conf=grid_conf)
-    valdata = parser(nusc, is_train=False, data_aug_conf=data_aug_conf,
-                       grid_conf=grid_conf)
+    traindata = parser(nusc, is_train=True, data_aug_conf=cfg.data_aug,
+                         grid_conf=cfg.grid_conf)
+    valdata = parser(nusc, is_train=False, data_aug_conf=cfg.data_aug,
+                       grid_conf=cfg.grid_conf)
 
-    trainloader = torch.utils.data.DataLoader(traindata, batch_size=bsz,
+    trainloader = torch.utils.data.DataLoader(traindata, batch_size=cfg.loader.batch_size,
                                               shuffle=True,
-                                              num_workers=nworkers,
+                                              num_workers=cfg.loader.nworkers,
                                               drop_last=True,
                                               worker_init_fn=worker_rnd_init)
-    valloader = torch.utils.data.DataLoader(valdata, batch_size=bsz,
-                                            shuffle=False,
-                                            num_workers=nworkers)
+    valloader = torch.utils.data.DataLoader(valdata, batch_size=cfg.loader.batch_size,
+                                            shuffle=True,
+                                            num_workers=cfg.loader.nworkers)
 
     return trainloader, valloader

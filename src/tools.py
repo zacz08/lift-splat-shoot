@@ -222,7 +222,8 @@ class QuickCumsum(torch.autograd.Function):
 class SimpleLoss(torch.nn.Module):
     def __init__(self, pos_weight):
         super(SimpleLoss, self).__init__()
-        self.loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([pos_weight]))
+        pos_weight = torch.tensor(pos_weight, dtype=torch.float32)
+        self.loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     def forward(self, ypred, ytgt):
         loss = self.loss_fn(ypred, ytgt)
