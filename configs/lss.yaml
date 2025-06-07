@@ -8,6 +8,15 @@ model:
   camC: 64
   outC: 6
 
+dataset:
+  name: nuscenes
+  semantic_layer: ['drivable_area',
+                    'ped_crossing',
+                    'walkway',
+                    'stop_line',
+                    'carpark_area',
+                    'lane_divider']
+
 data_aug:
   H: 900
   W: 1600
@@ -38,7 +47,7 @@ loader:
 trainer:
   epochs: 50
   gpus: 1
-  log_freq: 500
+  log_freq: 20
   precision: 32
 
 

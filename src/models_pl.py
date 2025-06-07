@@ -256,10 +256,13 @@ class LiftSplatShoot(pl.LightningModule):
 
         return x
 
-    def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
-        x = self.bevencode(x)
-        return x
+    def forward(self, x, rots, trans, intrins, post_rots, post_trans, return_feats=False):
+        bev_feat = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
+        x = self.bevencode(bev_feat)
+        if return_feats:
+            return x, bev_feat
+        else:
+            return x
     
     def training_step(self, batch, batch_idx):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
@@ -275,7 +278,7 @@ class LiftSplatShoot(pl.LightningModule):
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
         rec_weight = compute_layer_weights(bev_seg_gt)
         loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
-        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.seg_metric.update((preds > 0), bev_seg_gt)
 
     def on_validation_epoch_end(self):
@@ -283,6 +286,19 @@ class LiftSplatShoot(pl.LightningModule):
         iou= score.mean().item()
         log_dict = {'val/IoU': iou}
         self.log_dict(log_dict, prog_bar=True, logger=True, on_epoch=True, sync_dist=True)
+
+    @torch.no_grad()
+    def predict_step(self, batch, dataloader_idx = 0):   
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        self.seg_metric.update((preds > 0), bev_seg_gt)
+
+    @torch.no_grad()
+    def on_predict_epoch_end(self):
+        score = self.seg_metric.compute()
+        for index, layer in enumerate(self.cfg.dataset.semantic_layer):
+            print(f"IoU {layer}: {score[index].item():.5f}")
+
 
     @torch.no_grad()
     def log_images(self, batch, N=4, n_row=2, **kwargs):
@@ -300,7 +316,7 @@ class LiftSplatShoot(pl.LightningModule):
 
         fields = [
             "train/loss_epoch",
-            "val/loss",
+            "val/loss_epoch",
             "val/IoU",
         ]
 
