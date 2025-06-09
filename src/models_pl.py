@@ -265,18 +265,22 @@ class LiftSplatShoot(pl.LightningModule):
             return x
     
     def training_step(self, batch, batch_idx):
-        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        rec_weight = compute_layer_weights(bev_seg_gt)
+        # rec_weight = compute_layer_weights(bev_seg_gt)
+        rec_weight = torch.tensor([0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869], 
+                                  dtype=torch.float32, device=preds.device)
         loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         return loss
     
     def validation_step(self, batch, batch_idx):
-        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        rec_weight = compute_layer_weights(bev_seg_gt)
+        # rec_weight = compute_layer_weights(bev_seg_gt)
+        rec_weight = torch.tensor([0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869], 
+                                  dtype=torch.float32, device=preds.device)
         loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
         self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         self.seg_metric.update((preds > 0), bev_seg_gt)
@@ -288,8 +292,8 @@ class LiftSplatShoot(pl.LightningModule):
         self.log_dict(log_dict, prog_bar=True, logger=True, on_epoch=True, sync_dist=True)
 
     @torch.no_grad()
-    def predict_step(self, batch, dataloader_idx = 0):   
-        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+    def predict_step(self, batch, batch_index):
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
         self.seg_metric.update((preds > 0), bev_seg_gt)
 
@@ -302,7 +306,7 @@ class LiftSplatShoot(pl.LightningModule):
 
     @torch.no_grad()
     def log_images(self, batch, N=4, n_row=2, **kwargs):
-        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt = batch
+        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
         log = dict()
         log["prediction"] = preds

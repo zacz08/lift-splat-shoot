@@ -271,7 +271,7 @@ class SegmentationData(NuscData):
         # binimg = self.get_binimg(rec)
         bev_seg_gt = self.get_seg_gt(sample_token)
         
-        return imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt
+        return imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, sample_token
 
 
 def worker_rnd_init(x):
@@ -279,8 +279,8 @@ def worker_rnd_init(x):
 
 
 def compile_data(cfg, parser_name):
-    nusc = NuScenes(version='v1.0-{}'.format(cfg.version),
-                    dataroot=cfg.dataroot,
+    nusc = NuScenes(version='v1.0-{}'.format(cfg.dataset.version),
+                    dataroot=cfg.dataset.dataroot,
                     verbose=False)
     parser = {
         'vizdata': VizData,

@@ -28,10 +28,11 @@ def compute_pos_weight(mask_dir, num_classes=6):
 
 # 用法示例
 if __name__ == "__main__":
-    mask_root = "./data/nuscenes/bev_seg_gt_mask_200/mini_train"  
+    mask_root = "./data/nuscenes/bev_seg_gt_mask_200/train"  
     pos_weight = compute_pos_weight(mask_root, num_classes=6)
     rounded_pos_weight = [round(p.item(), 2) for p in pos_weight]
-    normalized = [round(w.item() / max(pos_weight).item(), 5) for w in pos_weight]
+    weights = pos_weight / (sum(pos_weight)) * 6
+    # normalized = [round(w.item() / max(pos_weight).item(), 5) for w in pos_weight]
     print("pos_weight =", rounded_pos_weight)
-    print("normalized =", normalized)
+    print("normalized =", weights)
 

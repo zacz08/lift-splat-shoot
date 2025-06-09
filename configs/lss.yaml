@@ -1,8 +1,5 @@
 # config.yaml
 
-version: trainval  # 'mini' or 'trainval' etc.
-dataroot: ./data/nuscenes
-
 model:
   downsample: 16
   camC: 64
@@ -10,6 +7,8 @@ model:
 
 dataset:
   name: nuscenes
+  version: trainval  # 'mini' or 'trainval'
+  dataroot: ./data/nuscenes
   semantic_layer: ['drivable_area',
                     'ped_crossing',
                     'walkway',
