@@ -6,19 +6,19 @@ from src.models_pl import LiftSplatShoot
 from src.data import compile_data
 from src.logger import ImageLogger
 
-ckpt_path = './lightning_logs/version_2/checkpoints/best-ckpt-epoch=30-step=13299.ckpt'
+ckpt_path = './ckpts/6_layer_epoch=30-step=13299.ckpt'
 
 def main():
     multiprocessing.set_start_method('spawn')
     cfg = OmegaConf.load('./configs/lss.yaml')
 
     model = LiftSplatShoot(cfg)
-    model.load_state_dict(torch.load(ckpt_path, weights_only=True)["state_dict"], strict=True)
+    model.load_state_dict(torch.load(ckpt_path)["state_dict"], strict=False)
     
     model.eval()
 
 
-    logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, rescale=False)
+    logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, rescale=False, disabled=True)
     train_dataloader, val_dataloader = compile_data(cfg=cfg, parser_name='segmentationdata')
 
     trainer = pl.Trainer(

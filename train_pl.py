@@ -1,7 +1,5 @@
-import torch
 import multiprocessing
 import pytorch_lightning as pl
-# from cldm.logger import ImageLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from omegaconf import OmegaConf
 from src.models_pl import LiftSplatShoot
@@ -15,7 +13,7 @@ def main():
     cfg = OmegaConf.load(config_path)
 
     model = LiftSplatShoot(cfg)
-    model.load_state_dict(torch.load('./ckpts/lss_init.ckpt')["state_dict"], strict=False)
+    # model.load_state_dict(torch.load('./ckpts/lss_init.ckpt')["state_dict"], strict=False)
 
     checkpoint_callback = ModelCheckpoint(
         monitor='val/IoU',

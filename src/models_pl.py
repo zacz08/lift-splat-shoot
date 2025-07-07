@@ -1,6 +1,7 @@
 import torch
 import os
 import csv
+import time
 from torch import nn
 from efficientnet_pytorch import EfficientNet
 import pytorch_lightning as pl
@@ -156,6 +157,8 @@ class LiftSplatShoot(pl.LightningModule):
         self.max_grad_norm = cfg.optim.max_grad_norm
 
         self.seg_metric = IntersectionOverUnion(cfg.model.outC).to(self.device)
+
+        self.inference_times = []
     
     def create_frustum(self):
         # make grid in image plane
@@ -293,15 +296,29 @@ class LiftSplatShoot(pl.LightningModule):
 
     @torch.no_grad()
     def predict_step(self, batch, batch_index):
+        start = time.time()
+
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        self.seg_metric.update((preds > 0), bev_seg_gt)
+        # self.seg_metric.update((preds > 0), bev_seg_gt)
+
+        torch.cuda.synchronize()
+        end = time.time()
+        elapsed = end - start
+        self.inference_times.append(elapsed)
 
     @torch.no_grad()
     def on_predict_epoch_end(self):
-        score = self.seg_metric.compute()
-        for index, layer in enumerate(self.cfg.dataset.semantic_layer):
-            print(f"IoU {layer}: {score[index].item():.5f}")
+        # score = self.seg_metric.compute()
+        # for index, layer in enumerate(self.cfg.dataset.semantic_layer):
+        #     print(f"IoU {layer}: {score[index].item():.5f}")
+
+        total_time = sum(self.inference_times)
+        num_samples = len(self.inference_times)
+        avg_time = total_time / num_samples
+        fps = 1.0 / avg_time
+        print(f"\n✅ Average time per sample = {avg_time:.4f} s, FPS = {fps:.2f}")
+
 
 
     @torch.no_grad()
