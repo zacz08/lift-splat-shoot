@@ -18,7 +18,7 @@ def main():
     model.eval()
 
 
-    logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, rescale=False, disabled=True)
+    logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, rescale=False)
     train_dataloader, val_dataloader = compile_data(cfg=cfg, parser_name='segmentationdata')
 
     trainer = pl.Trainer(

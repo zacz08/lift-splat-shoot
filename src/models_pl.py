@@ -300,7 +300,7 @@ class LiftSplatShoot(pl.LightningModule):
 
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        # self.seg_metric.update((preds > 0), bev_seg_gt)
+        self.seg_metric.update((preds > 0), bev_seg_gt)
 
         torch.cuda.synchronize()
         end = time.time()
@@ -309,9 +309,9 @@ class LiftSplatShoot(pl.LightningModule):
 
     @torch.no_grad()
     def on_predict_epoch_end(self):
-        # score = self.seg_metric.compute()
-        # for index, layer in enumerate(self.cfg.dataset.semantic_layer):
-        #     print(f"IoU {layer}: {score[index].item():.5f}")
+        score = self.seg_metric.compute()
+        for index, layer in enumerate(self.cfg.dataset.semantic_layer):
+            print(f"IoU {layer}: {score[index].item():.5f}")
 
         total_time = sum(self.inference_times)
         num_samples = len(self.inference_times)
