@@ -139,3 +139,4 @@ ckpts/
 data/
 lightning_logs/
 image_log/
+*-workspace

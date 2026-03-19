@@ -7,7 +7,7 @@ model:
 
 dataset:
   name: nuscenes
-  version: trainval  # 'mini' or 'trainval'
+  version: mini  # 'mini' or 'trainval'
   dataroot: ./data/nuscenes
   semantic_layer: ['drivable_area',
                     'ped_crossing',
