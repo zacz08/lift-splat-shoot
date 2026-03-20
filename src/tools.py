@@ -228,6 +228,84 @@ class SimpleLoss(torch.nn.Module):
         loss = self.loss_fn(ypred, ytgt).mean(dim=(2, 3))
         weighted_loss = (loss * weights).sum(dim=1)
         return weighted_loss.mean()
+    
+class EvidentialBinaryLoss(torch.nn.Module):
+    def __init__(self, warmup_epochs=10, kl_weight=1.0, eps=1e-8):
+        super(EvidentialBinaryLoss, self).__init__()
+        self.warmup_epochs = max(1, int(warmup_epochs))
+        self.kl_weight = float(kl_weight)
+        self.eps = float(eps)
+
+    def kl_divergence_beta(self, alpha, beta):
+        S = (alpha + beta).clamp_min(self.eps)
+        kl = torch.lgamma(S) - torch.lgamma(alpha) - torch.lgamma(beta)
+
+        kl += (alpha - 1.0) * (torch.digamma(alpha) - torch.digamma(S))
+        kl += (beta - 1.0) * (torch.digamma(beta) - torch.digamma(S))
+        return kl
+
+    def forward(self, evidence, ytgt, weights, current_epoch=None):
+        """
+        evidence: [B, C, 2, H, W]  (dim 2: index 0 为 fg evidence, index 1 为 bg evidence)
+        ytgt:     [B, C, H, W]     (Binary ground truth, 1 为前景, 0 为背景)
+        weights:  [C]              (各类别的权重)
+        current_epoch: int         (当前训练轮数，用于计算退火系数)
+        """
+        if evidence.ndim != 5 or evidence.shape[2] != 2:
+            raise ValueError(f"Expected evidence shape [B, C, 2, H, W], got {evidence.shape}")
+        if ytgt.ndim != 4:
+            raise ValueError(f"Expected target shape [B, C, H, W], got {ytgt.shape}")
+
+        ytgt = ytgt.float()
+        weights = weights.to(device=evidence.device, dtype=evidence.dtype)
+
+        # --- 2. 计算 Beta 分布参数 (alpha, beta) 与总强度 (S) ---
+        # 核心逻辑：后验参数 = 收集到的网络证据 (evidence) + 无信息先验 (1.0)
+        # clamp_min(0.0) 是防御性编程，确保进入计算的 evidence 严格非负
+        alpha_fg = evidence[:, :, 0, :, :].clamp_min(0.0) + 1.0
+        alpha_bg = evidence[:, :, 1, :, :].clamp_min(0.0) + 1.0
+
+        # 总强度 S 越大，代表模型收集到的总证据越多，主观逻辑中的不确定性 (u = 2/S) 就越低
+        S = (alpha_fg + alpha_bg).clamp_min(self.eps)
+
+        # --- 3. 计算数据拟合项 (Data-fit Loss / 单一 Bernoulli 风险) ---
+        p_fg = alpha_fg / S # 前景的期望概率 E[p]
+        p_bg = alpha_bg / S # 背景的期望概率 (在二分类中等价于 1 - p_fg)
+
+        # Beta 分布的理论方差 Var(p) = (alpha * beta) / (S^2 * (S + 1)) 
+        # 这里提取了 p_fg 和 p_bg 来极简计算：Var(p) = (p_fg * p_bg) / (S + 1.0)
+        variance = (p_fg * p_bg) / (S + 1.0)
+
+        # 均方误差期望 E[(y-p)^2] = (y - E[p])^2 + Var(p)
+        # 这一项会同时拉扯前景和背景：为了降低 loss，网络必须在正确类别上提供高证据，并压制错误类别的证据
+        loss_mse = (ytgt - p_fg).pow(2) + variance
+
+        # --- 4. 计算 KL 散度正则化项 (KL Divergence Regularization) ---
+        # 核心逻辑：我们只惩罚“错误类别”的证据，让错误证据趋于 0 (对应分布参数趋于 1.0)
+        # 如果真实标签是前景 (ytgt=1)，alpha_tilde_fg 保持原样，alpha_tilde_bg 被强制掩码为 1.0
+        alpha_tilde_fg = ytgt * alpha_fg + (1.0 - ytgt) * 1.0
+        alpha_tilde_bg = (1.0 - ytgt) * alpha_bg + ytgt * 1.0
+
+        # 计算掩码后的后验分布与均匀分布 Beta(1,1) (即完全未知状态) 之间的 KL 散度
+        kl_loss = self.kl_divergence_beta(alpha_tilde_fg, alpha_tilde_bg)
+
+        
+        # --- 5. 计算退火系数 (Annealing Coefficient) ---
+        # 防止训练早期模型在未学到任何特征时，就被 KL 散度强行惩罚成输出全 0 证据 (即全部输出未知)
+        if current_epoch is None:
+            lambda_t = 1.0
+        else:
+            lambda_t = min(1.0, float(current_epoch + 1) / float(self.warmup_epochs))
+
+        loss = loss_mse + self.kl_weight * lambda_t * kl_loss
+
+        loss = loss.mean(dim=(2, 3))
+        if weights.numel() != loss.shape[1]:
+            raise ValueError(f"Expected {loss.shape[1]} class weights, got {weights.numel()}")
+
+        weighted_loss = (loss * weights.view(1, -1)).sum(dim=1)
+        
+        return weighted_loss.mean()
 
 
 def get_batch_iou(preds, binimgs):

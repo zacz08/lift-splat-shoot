@@ -35,15 +35,15 @@ def save_predictions(model, data_loader, data_split='train', dataroot='./data/nu
                 imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, bev_token = batch
                 assert len(bev_token) == 1, "Only one bev_token is expected per batch"
                 bev_token = bev_token[0]  # Get the single token from the batch
-                preds, bev_feat = model(imgs, rots, trans, 
-                                        intrins, post_rots, post_trans,
-                                        return_feats=True)
-            preds = (preds > 0)
+                raw_output, bev_feat = model(imgs, rots, trans,
+                                             intrins, post_rots, post_trans,
+                                             return_feats=True)
+                _, _, preds = model.decode_output(raw_output)
             bev_feat_name = f"{index:05d}_bev_feat_{bev_token}.pt"
             feat_save_path = os.path.join(save_folder_bevfeat, bev_feat_name)
             pred_save_path = os.path.join(save_folder_predmap, f"{index:05d}_bev_pred_{bev_token}.npy")
             torch.save(bev_feat.squeeze(0).half(), feat_save_path)
-            np.save(pred_save_path, preds.squeeze(0).numpy())
+            np.save(pred_save_path, preds.squeeze(0).cpu().numpy())
 
             # write data to json file
             gt_save_path = get_seg_map_name_by_sample_token(

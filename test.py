@@ -1,5 +1,6 @@
 import torch
 import multiprocessing
+import os
 import pytorch_lightning as pl
 from omegaconf import OmegaConf
 from src.models_pl import LiftSplatShoot
@@ -11,6 +12,7 @@ ckpt_path = './ckpts/6_layer_epoch=30-step=13299.ckpt'
 def main():
     multiprocessing.set_start_method('spawn')
     cfg = OmegaConf.load('./configs/lss.yaml')
+    os.makedirs(cfg.logdir, exist_ok=True)
 
     model = LiftSplatShoot(cfg)
     model.load_state_dict(torch.load(ckpt_path)["state_dict"], strict=False)
@@ -26,7 +28,9 @@ def main():
         accelerator='gpu',
         devices=cfg.trainer.gpus,
         precision=cfg.trainer.precision, 
-        callbacks=[logger])
+        callbacks=[logger],
+        logger=False,
+        default_root_dir=cfg.logdir)
     
     trainer.predict(model, val_dataloader)
 

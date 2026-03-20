@@ -8,9 +8,8 @@ import pytorch_lightning as pl
 from torchvision.models.resnet import resnet18
 from src.log_analysis import parse_csv_and_plot
 from src.metrics import IntersectionOverUnion
-from src.loss import compute_layer_weights
 
-from .tools import gen_dx_bx, cumsum_trick, QuickCumsum, SimpleLoss, get_batch_iou
+from .tools import gen_dx_bx, cumsum_trick, QuickCumsum, EvidentialBinaryLoss
 
 
 class Up(nn.Module):
@@ -109,7 +108,8 @@ class BevEncode(nn.Module):
             nn.Conv2d(256, 128, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, outC, kernel_size=1, padding=0),
+            nn.Conv2d(128, outC * 2, kernel_size=1, padding=0),
+            nn.Softplus(beta=1.0, threshold=20.0),      # ensure positivity for evidential output
         )
 
     def forward(self, x):
@@ -151,14 +151,32 @@ class LiftSplatShoot(pl.LightningModule):
 
         self.use_quickcumsum = True
 
-        self.loss_fn = SimpleLoss()
+        # self.loss_fn = SimpleLoss()
+        warmup_epochs = int(cfg.loss.warmup_epochs) if ('loss' in cfg and 'warmup_epochs' in cfg.loss) else 10
+        kl_weight = float(cfg.loss.kl_weight) if ('loss' in cfg and 'kl_weight' in cfg.loss) else 1.0
+        self.loss_fn = EvidentialBinaryLoss(warmup_epochs=warmup_epochs, kl_weight=kl_weight)
         self.lr = cfg.optim.lr
         self.weight_decay = cfg.optim.weight_decay
         self.max_grad_norm = cfg.optim.max_grad_norm
 
-        self.seg_metric = IntersectionOverUnion(cfg.model.outC).to(self.device)
+        self.seg_metric = IntersectionOverUnion(cfg.model.outC)
+
+        default_class_weights = [0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869]
+        class_weights = cfg.loss.class_weights if ('loss' in cfg and 'class_weights' in cfg.loss) else default_class_weights
+        class_weights = torch.tensor(class_weights, dtype=torch.float32)
+        if class_weights.numel() != cfg.model.outC:
+            raise ValueError(
+                f"Expected {cfg.model.outC} class weights, but got {class_weights.numel()} in cfg.loss.class_weights"
+            )
+        self.register_buffer("class_weights", class_weights, persistent=False)
 
         self.inference_times = []
+
+        self.log_fields = [
+            "train/loss_epoch",
+            "val/loss_epoch",
+            "val/IoU",
+        ]
     
     def create_frustum(self):
         # make grid in image plane
@@ -266,43 +284,82 @@ class LiftSplatShoot(pl.LightningModule):
             return x, bev_feat
         else:
             return x
+
+    def reshape_evidence(self, raw_output):
+        if raw_output.ndim != 4:
+            raise ValueError(f"Expected model output with 4 dimensions [B, 2C, H, W], got {raw_output.shape}")
+        B, C2, H, W = raw_output.shape
+        outC = self.cfg.model.outC
+        if C2 != outC * 2:
+            raise ValueError(f"Expected channel dim {outC * 2}, got {C2}")
+        return raw_output.view(B, outC, 2, H, W)
+
+    @staticmethod
+    def evidence_to_probability(evidence):
+        alpha_fg = evidence[:, :, 0, :, :] + 1.0
+        alpha_bg = evidence[:, :, 1, :, :] + 1.0
+        return alpha_fg / (alpha_fg + alpha_bg + 1e-8)
+
+    def decode_output(self, raw_output, threshold=0.5):
+        evidence = self.reshape_evidence(raw_output)
+        probs = self.evidence_to_probability(evidence)
+        preds = probs > threshold
+        return evidence, probs, preds
     
     def training_step(self, batch, batch_idx):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
-        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        # rec_weight = compute_layer_weights(bev_seg_gt)
-        rec_weight = torch.tensor([0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869], 
-                                  dtype=torch.float32, device=preds.device)
-        loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        bev_seg_gt = bev_seg_gt.float()
+        raw_output = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        evidence = self.reshape_evidence(raw_output)
+
+        loss = self.loss_fn(
+            evidence,
+            bev_seg_gt,
+            self.class_weights,
+            current_epoch=self.current_epoch,
+        )
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=imgs.size(0)) 
 
         return loss
     
     def validation_step(self, batch, batch_idx):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
-        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        # rec_weight = compute_layer_weights(bev_seg_gt)
-        rec_weight = torch.tensor([0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869], 
-                                  dtype=torch.float32, device=preds.device)
-        loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
-        self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.seg_metric.update((preds > 0), bev_seg_gt)
+        bev_seg_gt = bev_seg_gt.float()
+        raw_output = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        evidence, _, pred_mask = self.decode_output(raw_output)
+
+        loss = self.loss_fn(
+            evidence,
+            bev_seg_gt,
+            self.class_weights,
+            current_epoch=self.current_epoch,
+        )
+        self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=imgs.size(0))
+        self.seg_metric.update(pred_mask, bev_seg_gt > 0.5)
 
     def on_validation_epoch_end(self):
         score = self.seg_metric.compute()
         iou= score.mean().item()
         log_dict = {'val/IoU': iou}
-        self.log_dict(log_dict, prog_bar=True, logger=True, on_epoch=True, sync_dist=True)
+        self.log_dict(log_dict, prog_bar=True, on_epoch=True, sync_dist=True)
+        self.seg_metric.reset()
+
+    def on_predict_epoch_start(self):
+        self.inference_times = []
 
     @torch.no_grad()
     def predict_step(self, batch, batch_index):
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(device=self.device)
         start = time.time()
 
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
-        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        self.seg_metric.update((preds > 0), bev_seg_gt)
+        raw_output = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        _, _, pred_mask = self.decode_output(raw_output)
+        self.seg_metric.update(pred_mask, bev_seg_gt > 0.5)
 
-        torch.cuda.synchronize()
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(device=self.device)
         end = time.time()
         elapsed = end - start
         self.inference_times.append(elapsed)
@@ -318,15 +375,25 @@ class LiftSplatShoot(pl.LightningModule):
         avg_time = total_time / num_samples
         fps = 1.0 / avg_time
         print(f"\n✅ Average time per sample = {avg_time:.4f} s, FPS = {fps:.2f}")
+        self.seg_metric.reset()
 
 
 
     @torch.no_grad()
     def log_images(self, batch, N=4, n_row=2, **kwargs):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
-        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        raw_output = self(imgs, rots, trans, intrins, post_rots, post_trans)
+        evidence, _, preds = self.decode_output(raw_output)
+
+        # Aggregate foreground evidence across semantic layers and normalize to [0, 1].
+        evidence_heatmap = evidence[:, :, 0, :, :].sum(dim=1, keepdim=True)
+        heat_min = evidence_heatmap.amin(dim=(2, 3), keepdim=True)
+        heat_max = evidence_heatmap.amax(dim=(2, 3), keepdim=True)
+        evidence_heatmap = (evidence_heatmap - heat_min) / (heat_max - heat_min + 1e-8)
+
         log = dict()
-        log["prediction"] = preds
+        log["prediction"] = preds.float()
+        log["evidential_heatmap"] = evidence_heatmap.float()
         log["groundtruth"] = bev_seg_gt   
         return log
     
@@ -342,12 +409,12 @@ class LiftSplatShoot(pl.LightningModule):
         ]
 
         row = {"epoch": epoch}
-        for key in fields:
+        for key in self.log_fields:
             val = metrics.get(key)
             row[key] = val.item() if val is not None else None
 
         # Write to CSV
-        csv_file = os.path.join(self.logger.log_dir, "train_log.csv")
+        csv_file = os.path.join(self.log_dir, "train_log.csv")
         file_exists = os.path.exists(csv_file)
         with open(csv_file, mode='a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=["epoch"] + fields)
@@ -356,7 +423,7 @@ class LiftSplatShoot(pl.LightningModule):
             writer.writerow({k: ("" if v is None else f"{v:.3f}") for k, v in row.items()})
 
         # Draw learning curve
-        learning_curve = os.path.join(self.logger.log_dir, "loss_plot.png")
+        learning_curve = os.path.join(self.log_dir, "loss_plot.png")
         parse_csv_and_plot(csv_file, learning_curve)
 
     def configure_optimizers(self):
