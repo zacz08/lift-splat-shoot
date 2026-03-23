@@ -295,11 +295,11 @@ def compile_data(cfg, parser_name):
                                               shuffle=True,
                                               num_workers=cfg.loader.nworkers,
                                               drop_last=True,
-                                              persistent_workers=True,
+                                              persistent_workers=True if cfg.loader.nworkers > 0 else False,
                                               worker_init_fn=worker_rnd_init)
     valloader = torch.utils.data.DataLoader(valdata, batch_size=cfg.loader.batch_size,
                                             shuffle=False,
                                             num_workers=cfg.loader.nworkers,
-                                            persistent_workers=True)
+                                            persistent_workers=True if cfg.loader.nworkers > 0 else False)
 
     return trainloader, valloader

@@ -281,10 +281,10 @@ class EvidentialBinaryLoss(torch.nn.Module):
         loss_mse = (ytgt - p_fg).pow(2) + variance
 
         # --- 4. 计算 KL 散度正则化项 (KL Divergence Regularization) ---
-        # 核心逻辑：我们只惩罚“错误类别”的证据，让错误证据趋于 0 (对应分布参数趋于 1.0)
-        # 如果真实标签是前景 (ytgt=1)，alpha_tilde_fg 保持原样，alpha_tilde_bg 被强制掩码为 1.0
-        alpha_tilde_fg = ytgt * alpha_fg + (1.0 - ytgt) * 1.0
-        alpha_tilde_bg = (1.0 - ytgt) * alpha_bg + ytgt * 1.0
+        # 核心逻辑：只惩罚“错误类别”的证据，让错误证据趋于 0 (对应分布参数趋于 1.0)
+        # 若 ytgt=1（前景），保留错误类 bg 的证据并将 fg 置为 1.0；若 ytgt=0（背景）则反之。
+        alpha_tilde_fg = (1.0 - ytgt) * alpha_fg + ytgt * 1.0
+        alpha_tilde_bg = ytgt * alpha_bg + (1.0 - ytgt) * 1.0
 
         # 计算掩码后的后验分布与均匀分布 Beta(1,1) (即完全未知状态) 之间的 KL 散度
         kl_loss = self.kl_divergence_beta(alpha_tilde_fg, alpha_tilde_bg)
