@@ -95,7 +95,16 @@ def parse_log_and_plot(log_file_path):
     plt.tight_layout()
     plt.show()
 
-def parse_csv_and_plot(csv_path, output_path):
+def parse_csv_and_plot(csv_path, output_path, fields_to_plot=None):
+    """
+    Parse CSV and plot training curves.
+    
+    Args:
+        csv_path: Path to the CSV file
+        output_path: Path to save the output plot
+        fields_to_plot: List of field names to plot. If None, plots default fields.
+                       Fields should be in format like "train/loss_epoch", "val/IoU", etc.
+    """
     import pandas as pd
     import matplotlib.pyplot as plt
 
@@ -106,28 +115,28 @@ def parse_csv_and_plot(csv_path, output_path):
 
     def safe_plot(column, label, style='-'):
         if column in df.columns and df[column].notna().any():
-            plt.plot(df["epoch"], df[column], style, label=label)
+            # 转换为 numpy array 以避免 pandas 多维索引错误
+            plt.plot(df["epoch"].values, df[column].values, style, label=label)
 
-    # Train loss
-    safe_plot("train/loss_simple_epoch", "train/loss_simple")
-    safe_plot("train/loss_epoch", "train/loss")
-    safe_plot("train/loss_vlb_epoch", "train/loss_vlb")
-    safe_plot("train/loss_seg_epoch", "train/loss_seg")
-    safe_plot("train/loss_c_epoch", "train/loss_c")
-    safe_plot("train/loss_o_epoch", "train/loss_o")
-
-    # Validation loss
-    safe_plot("val/loss_simple", "val/loss_simple", '--')
-    safe_plot("val/loss", "val/loss", '--')
-    safe_plot("val/loss_vlb", "val/loss_vlb", '--')
-    safe_plot("val/loss_seg", "val/loss_seg", '--')
-    safe_plot("val/loss_c", "val/loss_c", '--')
-    safe_plot("val/loss_o", "val/loss_o", '--')
-    safe_plot("val/IoU", "val/IoU", '--')
+    # 如果没有指定字段，使用默认字段
+    if fields_to_plot is None:
+        fields_to_plot = [
+            "train/loss_seg_epoch",
+            "val/loss_seg",
+            "val/IoU"
+        ]
+    
+    # 根据字段列表绘制曲线
+    for field in fields_to_plot:
+        # 确定线型：验证集使用虚线，训练集使用实线
+        style = '--' if field.startswith('val/') else '-'
+        # 提取简洁的标签名
+        label = field
+        safe_plot(field, label, style)
 
     plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training & Validation Loss")
+    plt.ylabel("Metrics")
+    plt.title("Training & Validation Metrics")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()

@@ -22,6 +22,9 @@ class IntersectionOverUnion(Metric):
         # Update the metric
         self.metric.update(prediction, target)
 
+    def reset(self):
+        super().reset()
+        self.metric.reset()
 
     def compute(self):
         stats = self.metric.compute()   # shape [n_classes, [tp, fp, tn, fn]]

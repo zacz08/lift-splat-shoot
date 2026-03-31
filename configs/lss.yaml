@@ -19,8 +19,8 @@ dataset:
 data_aug:
   H: 900
   W: 1600
-  resize_lim: [0.193, 0.225]
-  final_dim: [128, 352]
+  resize_lim: [0.320, 0.373]
+  final_dim: [288, 512]
   bot_pct_lim: [0.0, 0.22]
   rot_lim: [-5.4, 5.4]
   rand_flip: true
@@ -48,6 +48,22 @@ trainer:
   gpus: 1
   log_freq: 20
   precision: 32
+
+trainer_config:
+  seed: 42  # Random seed for reproducibility
+  lr: !!float 1e-3
+  min_lr: !!float 1e-4
+  iou_loss: lovasz  # Options: 'dice', 'lovasz'
+  weight_decay: !!float 1e-4  #1e-4 for dice loss, 1e-2 for lovasz loss
+  gpu_num: 1
+  precision: 16-mixed
+  epochs: 40
+  warmup_percent: 0.1
+  logger_freq: 100
+  val_after_epoch: 0
+  acc_grad_batches: 1 # Gradient accumulation steps (final_bs = bs * acc_grad_batches)
+  resume_path: logs/01_11_19_40/best-ckpt-epoch=36-step=31783.ckpt
+  pretrain_path: null
 
 
 loss:

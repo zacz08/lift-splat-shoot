@@ -8,7 +8,9 @@ import pytorch_lightning as pl
 from torchvision.models.resnet import resnet18
 from src.log_analysis import parse_csv_and_plot
 from src.metrics import IntersectionOverUnion
-from src.loss import compute_layer_weights
+from src.loss import compute_layer_weights, WeightedBCEWithLogitsLoss, WeightedDiceLoss, LovaszLoss
+import math
+from src.data import compile_data
 
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum, SimpleLoss, get_batch_iou
 
@@ -92,7 +94,7 @@ class BevEncode(nn.Module):
     def __init__(self, inC, outC):
         super(BevEncode, self).__init__()
 
-        trunk = resnet18(pretrained=False, zero_init_residual=True)
+        trunk = resnet18(weights=None, zero_init_residual=True)
         self.conv1 = nn.Conv2d(inC, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = trunk.bn1
@@ -128,7 +130,7 @@ class BevEncode(nn.Module):
 
 
 class LiftSplatShoot(pl.LightningModule):
-    def __init__(self, cfg):
+    def __init__(self, cfg, **kwargs):
         super().__init__()
         self.cfg = cfg
         self.save_hyperparameters(cfg)
@@ -151,7 +153,20 @@ class LiftSplatShoot(pl.LightningModule):
 
         self.use_quickcumsum = True
 
-        self.loss_fn = SimpleLoss()
+        # self.loss_fn = SimpleLoss()
+        #======= loss and metric =======#
+        self.bce_loss = WeightedBCEWithLogitsLoss()
+
+        self.opt_cfg = cfg.trainer_config
+        self.use_scheduler = self.opt_cfg is not None
+
+        if self.opt_cfg.get('iou_loss') == 'dice':
+            self.iou_loss = WeightedDiceLoss()
+        elif self.opt_cfg.get('iou_loss') == 'lovasz':
+            self.iou_loss = LovaszLoss()
+        else:
+            raise ValueError(f"Invalid iou_loss: {self.opt_cfg.get('iou_loss')}")
+        print(f"[LSS] Using {self.opt_cfg.get('iou_loss')} loss for IoU optimization.")
         self.lr = cfg.optim.lr
         self.weight_decay = cfg.optim.weight_decay
         self.max_grad_norm = cfg.optim.max_grad_norm
@@ -159,6 +174,26 @@ class LiftSplatShoot(pl.LightningModule):
         self.seg_metric = IntersectionOverUnion(cfg.model.outC).to(self.device)
 
         self.inference_times = []
+
+        self.log_fields = [
+            "train/loss_bce_epoch",
+            "train/loss_iou_epoch",
+            "train/loss_epoch",
+            "val/loss_epoch",
+            "val/loss_bce_epoch",
+            "val/loss_iou_epoch",
+            "val/IoU",
+        ]
+
+    def setup(self, stage=None):
+        if not hasattr(self, '_train_loader'):
+            self._train_loader, self._val_loader = compile_data(cfg=self.cfg, parser_name='segmentationdata')
+
+    def train_dataloader(self):
+        return self._train_loader
+
+    def val_dataloader(self):
+        return self._val_loader
     
     def create_frustum(self):
         # make grid in image plane
@@ -267,51 +302,105 @@ class LiftSplatShoot(pl.LightningModule):
         else:
             return x
     
-    def training_step(self, batch, batch_idx):
+    def shared_step(self, batch, **kwargs):
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        # rec_weight = compute_layer_weights(bev_seg_gt)
-        rec_weight = torch.tensor([0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869], 
-                                  dtype=torch.float32, device=preds.device)
-        loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        weight = compute_layer_weights(bev_seg_gt)
+        loss_bce = self.bce_loss(preds, bev_seg_gt, weight)
+        if self.opt_cfg.get('iou_loss') == 'dice':
+            loss_iou = self.iou_loss(preds, bev_seg_gt, weight)
+        elif self.opt_cfg.get('iou_loss') == 'lovasz':
+            loss_iou = self.iou_loss(preds, bev_seg_gt)
+        loss = 0.5 * loss_bce + 0.5 * loss_iou
+
+        loss_dict = {}
+        prefix = kwargs.get('prefix', 'train')
+        loss_dict.update({f'{prefix}/loss_bce': loss_bce.detach()})
+        loss_dict.update({f'{prefix}/loss_iou': loss_iou.detach()})
+        loss_dict.update({f'{prefix}/loss': loss.detach()})
+
+        return loss, loss_dict
+    
+    def training_step(self, batch, **kwargs):
+
+        loss, loss_dict = self.shared_step(batch, prefix='train', **kwargs)
+
+        self.log_dict(loss_dict, prog_bar=True, logger=False, on_step=True, on_epoch=True, sync_dist=True)
+
+        self.log("global_step", self.global_step, prog_bar=True, logger=False, on_step=True, on_epoch=False)
+
+        if self.use_scheduler:
+            lr = self.optimizers().param_groups[0]['lr']
+            self.log('lr', lr, prog_bar=True, logger=False, on_step=True, on_epoch=False, sync_dist=True)
 
         return loss
     
-    def validation_step(self, batch, batch_idx):
-        imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
-        preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        # rec_weight = compute_layer_weights(bev_seg_gt)
-        rec_weight = torch.tensor([0.0671, 1.7914, 0.2680, 1.3406, 1.6461, 0.8869], 
-                                  dtype=torch.float32, device=preds.device)
-        loss = self.loss_fn(preds, bev_seg_gt, rec_weight)
-        self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.seg_metric.update((preds > 0), bev_seg_gt)
+    def validation_step(self, batch, **kwargs):
+        val_epoch = self.opt_cfg.get('val_after_epoch', 0)
+
+        if self.current_epoch < val_epoch:
+            self.log("val/IoU", torch.tensor(float("nan"), device=self.device), 
+                     prog_bar=True, logger=False, on_epoch=True, sync_dist=True)
+            return
+        
+        self.predict_step(batch, prefix='val', **kwargs)
 
     def on_validation_epoch_end(self):
+        val_epoch = self.opt_cfg.get('val_after_epoch', 0)
+
+        if self.current_epoch < val_epoch:
+            return
+        
         score = self.seg_metric.compute()
         iou= score.mean().item()
         log_dict = {'val/IoU': iou}
-        self.log_dict(log_dict, prog_bar=True, logger=True, on_epoch=True, sync_dist=True)
+        self.log_dict(log_dict, prog_bar=True, logger=False, on_epoch=True, sync_dist=True)
+        self.seg_metric.reset()
 
     @torch.no_grad()
-    def predict_step(self, batch, batch_index):
+    def predict_step(self, batch, **kwargs):
         start = time.time()
 
         imgs, rots, trans, intrins, post_rots, post_trans, bev_seg_gt, _ = batch
         preds = self(imgs, rots, trans, intrins, post_rots, post_trans)
-        self.seg_metric.update((preds > 0), bev_seg_gt)
+        # Binarize predictions: logits > 0 <=> sigmoid(logits) > 0.5
+        # Binarize GT: values > 0.5 (since GT is in [0, 1])
+        self.seg_metric.update((preds > 0), (bev_seg_gt > 0.5))
 
         torch.cuda.synchronize()
         end = time.time()
         elapsed = end - start
         self.inference_times.append(elapsed)
 
+        weight = compute_layer_weights(bev_seg_gt)
+        loss_bce = self.bce_loss(preds, bev_seg_gt, weight)
+        if self.opt_cfg.get('iou_loss') == 'dice':
+            loss_iou = self.iou_loss(preds, bev_seg_gt, weight)
+        elif self.opt_cfg.get('iou_loss') == 'lovasz':
+            loss_iou = self.iou_loss(preds, bev_seg_gt)
+        loss = 0.5 * loss_bce + 0.5 * loss_iou
+
+        loss_dict = {}
+        prefix = kwargs.get('prefix', 'predict')
+        loss_dict.update({f'{prefix}/loss': loss.detach()})
+        loss_dict.update({f'{prefix}/loss_bce': loss_bce.detach()})
+        loss_dict.update({f'{prefix}/loss_iou': loss_iou.detach()})
+
+        if prefix != 'predict':
+            self.log_dict(loss_dict, prog_bar=True, logger=False, on_step=True, on_epoch=True, sync_dist=True)
+
     @torch.no_grad()
     def on_predict_epoch_end(self):
         score = self.seg_metric.compute()
         for index, layer in enumerate(self.cfg.dataset.semantic_layer):
             print(f"IoU {layer}: {score[index].item():.5f}")
+        
+        # Calculate and print average IoU across all semantic layers
+        avg_iou = score.mean().item()
+        print(f"\n{'='*50}")
+        print(f"Average IoU (across all layers): {avg_iou:.5f}")
+        print(f"{'='*50}")
 
         total_time = sum(self.inference_times)
         num_samples = len(self.inference_times)
@@ -332,36 +421,82 @@ class LiftSplatShoot(pl.LightningModule):
     
     @torch.no_grad()
     def on_train_epoch_end(self):
+        torch.cuda.empty_cache()
+        
         metrics = self.trainer.callback_metrics  # All logged metrics
         epoch = int(self.current_epoch)
 
-        fields = [
-            "train/loss_epoch",
-            "val/loss_epoch",
-            "val/IoU",
-        ]
-
         row = {"epoch": epoch}
-        for key in fields:
+        for key in self.log_fields:
             val = metrics.get(key)
             row[key] = val.item() if val is not None else None
 
         # Write to CSV
-        csv_file = os.path.join(self.logger.log_dir, "train_log.csv")
+        csv_file = os.path.join(self.log_dir, "train_log.csv")
         file_exists = os.path.exists(csv_file)
         with open(csv_file, mode='a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=["epoch"] + fields)
+            writer = csv.DictWriter(f, fieldnames=["epoch"] + self.log_fields)
             if not file_exists:
                 writer.writeheader()
             writer.writerow({k: ("" if v is None else f"{v:.3f}") for k, v in row.items()})
 
         # Draw learning curve
-        learning_curve = os.path.join(self.logger.log_dir, "loss_plot.png")
-        parse_csv_and_plot(csv_file, learning_curve)
+        learning_curve = os.path.join(self.log_dir, "loss_plot.png")
+        parse_csv_and_plot(csv_file, learning_curve, fields_to_plot=self.log_fields)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        return optimizer
+        base_lr = self.opt_cfg.get("lr", 5e-5)
+        min_lr = self.opt_cfg.get("min_lr", 1e-7)
+        weight_decay = self.opt_cfg.get("weight_decay", 1e-2)
 
-    def on_before_zero_grad(self, optimizer):
+        train_loader = self.train_dataloader()
+        # steps_per_epoch = len(train_loader)
+        
+        # === grid accumulation configs ===
+        # 获取梯度累积步数，默认为 1
+        acc_batches = self.trainer.accumulate_grad_batches 
+        
+        # 计算每个 epoch 的优化步数 (optimization steps)
+        steps_per_epoch = len(train_loader) // acc_batches
+        
+        # 确保至少为 1，防止数据量太少导致除零或为零
+        if steps_per_epoch < 1:
+            steps_per_epoch = 1
+            print(f"[Warning] Steps per epoch adjusted to 1. Check batch size and accumulation.")
+
+        num_epochs = self.trainer.max_epochs
+        total_steps = steps_per_epoch * num_epochs
+        warmup_steps = int(self.opt_cfg.get("warmup_percent", 0.1) * total_steps)
+
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.parameters()),
+            lr=base_lr,
+            weight_decay=weight_decay
+        )
+
+        # Cosine Annealing scheduler (linear warmup + cosine decay)
+        def lr_lambda(current_step):
+            if current_step <= warmup_steps:
+                return float(current_step + 1) / float(warmup_steps)
+            else:
+                progress = (current_step - warmup_steps) / (total_steps - warmup_steps)
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                min_ratio = min_lr / base_lr
+                return max(cosine_decay, min_ratio)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+        print(f"Training steps: {total_steps}, Warmup: {warmup_steps}, Steps per epoch: {steps_per_epoch}")
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+                "name": "warmup_cosine"
+            }
+        }
+
+    def on_before_optimizer_step(self, optimizer):
         torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)

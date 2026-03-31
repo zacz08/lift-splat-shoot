@@ -1,32 +1,50 @@
 import torch
+import os
 import multiprocessing
 import pytorch_lightning as pl
 from omegaconf import OmegaConf
 from src.models_pl import LiftSplatShoot
 from src.data import compile_data
 from src.logger import ImageLogger
+from train_pl import seed_everything
+import datetime
 
-ckpt_path = './ckpts/6_layer_epoch=30-step=13299.ckpt'
+ckpt_path = 'logs/01_12_15_08_miou=34.4/best-ckpt-epoch=37-step=32642.ckpt'
 
 def main():
     multiprocessing.set_start_method('spawn')
     cfg = OmegaConf.load('./configs/lss.yaml')
+    seed_everything(cfg.trainer_config.get('seed', 42))
+
+    # create logger path
+    now = datetime.datetime.now()
+    log_folder_path ='logs/' + '_'.join(map(lambda x: '%02d' % x, (now.month, now.day, now.hour, now.minute)))
+    os.makedirs(log_folder_path, exist_ok=True)
+    print(f"[Log] Logging to {log_folder_path}")
+    
+    # save config used for this experiment
+    config_save_path = os.path.join(log_folder_path, "config.yaml")
+    OmegaConf.save(cfg, config_save_path)
+    print(f"[Config] Saved to {config_save_path}")
 
     model = LiftSplatShoot(cfg)
-    model.load_state_dict(torch.load(ckpt_path)["state_dict"], strict=False)
+    model.load_state_dict(torch.load(ckpt_path, weights_only=False)["state_dict"], strict=False)
     
     model.eval()
 
 
-    logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, rescale=False)
-    train_dataloader, val_dataloader = compile_data(cfg=cfg, parser_name='segmentationdata')
+    logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, 
+                         rescale=False,
+                         log_folder=log_folder_path)
+    _, val_dataloader = compile_data(cfg=cfg, parser_name='segmentationdata')
 
     trainer = pl.Trainer(
         strategy="auto", 
         accelerator='gpu',
-        devices=cfg.trainer.gpus,
-        precision=cfg.trainer.precision, 
-        callbacks=[logger])
+        devices=1,
+        precision=cfg.trainer_config.precision, 
+        callbacks=[logger],
+        logger=False)
     
     trainer.predict(model, val_dataloader)
 
