@@ -11,6 +11,11 @@ import datetime
 
 ckpt_path = 'logs/01_12_15_08_miou=34.4/best-ckpt-epoch=37-step=32642.ckpt'
 
+# Scene classification filter (set to None to use all scenes)
+# Options: None, 'normal', 'rainy', 'night', or ['rainy', 'night']
+scene_class_file = 'data/nuscenes/scene_classes.json'  # path to classification JSON
+scene_class_filter = 'night'  # e.g. 'night' to only evaluate night scenes
+
 def main():
     multiprocessing.set_start_method('spawn')
     cfg = OmegaConf.load('./configs/lss.yaml')
@@ -32,11 +37,16 @@ def main():
     
     model.eval()
 
+    # Determine scene class filter arguments
+    sc_file = scene_class_file if scene_class_filter is not None else None
+    sc_filter = scene_class_filter
 
     logger = ImageLogger(batch_frequency=cfg.trainer.log_freq, 
                          rescale=False,
                          log_folder=log_folder_path)
-    _, val_dataloader = compile_data(cfg=cfg, parser_name='segmentationdata')
+    _, val_dataloader = compile_data(cfg=cfg, parser_name='segmentationdata',
+                                     scene_class_file=sc_file,
+                                     scene_class_filter=sc_filter)
 
     trainer = pl.Trainer(
         strategy="auto", 

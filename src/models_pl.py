@@ -187,7 +187,15 @@ class LiftSplatShoot(pl.LightningModule):
 
     def setup(self, stage=None):
         if not hasattr(self, '_train_loader'):
-            self._train_loader, self._val_loader = compile_data(cfg=self.cfg, parser_name='segmentationdata')
+            # Pass scene_class_filter for val set only (from config if present)
+            sc_file = self.cfg.get('scene_class_file', None)
+            sc_filter = self.cfg.get('scene_class_filter', None)
+            if sc_filter is not None and sc_file is None:
+                sc_file = 'data/nuscenes/scene_classes.json'
+            self._train_loader, self._val_loader = compile_data(
+                cfg=self.cfg, parser_name='segmentationdata',
+                scene_class_file=sc_file if sc_filter is not None else None,
+                scene_class_filter=sc_filter)
 
     def train_dataloader(self):
         return self._train_loader
@@ -358,6 +366,27 @@ class LiftSplatShoot(pl.LightningModule):
         self.log_dict(log_dict, prog_bar=True, logger=False, on_epoch=True, sync_dist=True)
         self.seg_metric.reset()
 
+        # Write training + validation metrics to CSV
+        # This is done here (after validation) so that val/IoU is up-to-date for this epoch.
+        metrics = self.trainer.callback_metrics
+        epoch = int(self.current_epoch)
+
+        row = {"epoch": epoch}
+        for key in self.log_fields:
+            val = metrics.get(key)
+            row[key] = val.item() if val is not None else None
+
+        csv_file = os.path.join(self.log_dir, "train_log.csv")
+        file_exists = os.path.exists(csv_file)
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=["epoch"] + self.log_fields)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({k: ("" if v is None else f"{v:.3f}") for k, v in row.items()})
+
+        learning_curve = os.path.join(self.log_dir, "loss_plot.png")
+        parse_csv_and_plot(csv_file, learning_curve, fields_to_plot=self.log_fields)
+
     @torch.no_grad()
     def predict_step(self, batch, **kwargs):
         start = time.time()
@@ -422,27 +451,6 @@ class LiftSplatShoot(pl.LightningModule):
     @torch.no_grad()
     def on_train_epoch_end(self):
         torch.cuda.empty_cache()
-        
-        metrics = self.trainer.callback_metrics  # All logged metrics
-        epoch = int(self.current_epoch)
-
-        row = {"epoch": epoch}
-        for key in self.log_fields:
-            val = metrics.get(key)
-            row[key] = val.item() if val is not None else None
-
-        # Write to CSV
-        csv_file = os.path.join(self.log_dir, "train_log.csv")
-        file_exists = os.path.exists(csv_file)
-        with open(csv_file, mode='a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=["epoch"] + self.log_fields)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow({k: ("" if v is None else f"{v:.3f}") for k, v in row.items()})
-
-        # Draw learning curve
-        learning_curve = os.path.join(self.log_dir, "loss_plot.png")
-        parse_csv_and_plot(csv_file, learning_curve, fields_to_plot=self.log_fields)
 
     def configure_optimizers(self):
         base_lr = self.opt_cfg.get("lr", 5e-5)

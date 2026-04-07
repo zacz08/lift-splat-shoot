@@ -4,6 +4,7 @@ Licensed under the NVIDIA Source Code License. See LICENSE at https://github.com
 Authors: Jonah Philion and Sanja Fidler
 """
 
+import json
 import torch
 import os
 import numpy as np
@@ -20,7 +21,8 @@ from .tools import get_lidar_data, img_transform, normalize_img, gen_dx_bx
 
 
 class NuscData(torch.utils.data.Dataset):
-    def __init__(self, nusc, is_train, data_aug_conf, grid_conf):
+    def __init__(self, nusc, is_train, data_aug_conf, grid_conf,
+                 scene_class_file=None, scene_class_filter=None):
         self.nusc = nusc
         self.dataroot = self.nusc.dataroot
         self.nusc_can = NuScenesCanBus(dataroot=self.dataroot)
@@ -40,6 +42,10 @@ class NuscData(torch.utils.data.Dataset):
             self.split_name = 'mini_train' if self.is_train else 'mini_val'
         else:
             self.split_name = 'train' if self.is_train else 'val'
+
+        # Apply scene class filter (e.g. 'rainy', 'night')
+        if scene_class_file is not None and scene_class_filter is not None:
+            self._apply_scene_class_filter(scene_class_file, scene_class_filter)
 
         print(self)
 
@@ -235,6 +241,40 @@ class NuscData(torch.utils.data.Dataset):
             cams = self.data_aug_conf['cams']
         return cams
 
+    def _apply_scene_class_filter(self, scene_class_file, scene_class_filter):
+        """Filter scenes to only include those matching the given category.
+
+        Args:
+            scene_class_file: Path to JSON file mapping scene tokens to categories.
+            scene_class_filter: Category string or list, e.g. 'rainy', 'night',
+                                or ['rainy', 'night'].
+        """
+        with open(scene_class_file, 'r') as f:
+            classifications = json.load(f)
+
+        if isinstance(scene_class_filter, str):
+            scene_class_filter = [scene_class_filter]
+
+        # Build set of scene tokens matching the filter
+        keep_tokens = set()
+        for token, info in classifications.items():
+            if info['category'] in scene_class_filter:
+                keep_tokens.add(token)
+
+        # Map scene tokens to scene names
+        keep_names = set()
+        for sc in self.nusc.scene:
+            if sc['token'] in keep_tokens:
+                keep_names.add(sc['name'])
+
+        n_before = len(self.scenes)
+        self.scenes = [s for s in self.scenes if s in keep_names]
+        # Re-compute samples with filtered scenes
+        self.ixes = self.prepro()
+        print(f"[NuscData] Scene class filter {scene_class_filter}: "
+              f"{len(self.scenes)}/{n_before} scenes, "
+              f"{len(self.ixes)} samples")
+
     def __str__(self):
         return f"""NuscData: {len(self)} samples. Split: {"train" if self.is_train else "val"}.
                    Augmentation Conf: {self.data_aug_conf}"""
@@ -278,7 +318,7 @@ def worker_rnd_init(x):
     np.random.seed(13 + x)
 
 
-def compile_data(cfg, parser_name):
+def compile_data(cfg, parser_name, scene_class_file=None, scene_class_filter=None):
     nusc = NuScenes(version='v1.0-{}'.format(cfg.dataset.version),
                     dataroot=cfg.dataset.dataroot,
                     verbose=False)
@@ -289,7 +329,9 @@ def compile_data(cfg, parser_name):
     traindata = parser(nusc, is_train=True, data_aug_conf=cfg.data_aug,
                          grid_conf=cfg.grid_conf)
     valdata = parser(nusc, is_train=False, data_aug_conf=cfg.data_aug,
-                       grid_conf=cfg.grid_conf)
+                       grid_conf=cfg.grid_conf,
+                       scene_class_file=scene_class_file,
+                       scene_class_filter=scene_class_filter)
 
     trainloader = torch.utils.data.DataLoader(traindata, batch_size=cfg.loader.batch_size,
                                               shuffle=True,
